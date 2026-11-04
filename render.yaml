@@ -1,14 +1,20 @@
-# Render Blueprint: one click deploy of the whole site (hall, garden, accounts) as a single always-on web service.
-# The disk keeps accounts, levels and leaderboards between restarts. A disk needs a paid plan ("starter").
-# Free alternative: use plan "free", remove the disk, and set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN
-# (a free Upstash Redis database) so accounts live outside the server. The free plan sleeps when nobody visits.
+# Render Blueprint: deploys the whole site (hall, garden, accounts) as one web service.
+#
+# TEST VERSION: free plan, no disk. The free plan sleeps when nobody visits and wipes its disk on every restart,
+# so accounts and levels are NOT kept for long. Good for trying everything out.
+#
+# TO KEEP ACCOUNTS (pick one):
+#  - paid plan: change `plan` to starter and add the disk shown at the bottom, or
+#  - stay free and set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN (a free Upstash Redis database).
 services:
   - type: web
     name: moctaman
     runtime: docker
-    plan: starter
+    plan: free
     healthCheckPath: /healthz
-    disk:
-      name: data
-      mountPath: /app/data
-      sizeGB: 1
+
+# disk for the paid plan (put it under the service above):
+#    disk:
+#      name: data
+#      mountPath: /app/data
+#      sizeGB: 1
