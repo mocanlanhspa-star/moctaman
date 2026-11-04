@@ -1,0 +1,15 @@
+THÊM KINH MỚI VÀO BẢNG TỤNG KINH
+
+1. Tạo một file .txt trong thư mục này (public/kinh), lưu dạng UTF-8.
+   Mỗi dòng là một câu. Mỗi tiếng gõ mõ sẽ chuyển sang câu kế tiếp.
+   Nên dán đúng bản mà chùa mình đang tụng, vì mỗi nơi có thể khác đôi chữ.
+
+2. Mở file index.json trong thư mục này và liệt kê kinh, ví dụ:
+
+   [
+     { "id": "ten-ngan-gon", "name": "Tên hiện trên bảng", "file": "ten-file.txt" }
+   ]
+
+   Muốn thêm nhiều bài thì thêm nhiều dòng, ngăn cách bằng dấu phẩy.
+
+3. Tải lại trang web là bài mới hiện trong danh sách.

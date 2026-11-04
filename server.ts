@@ -1,0 +1,487 @@
+import express from 'express';
+import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
+import http from 'http';
+import { fileURLToPath } from 'url';
+import { maskBanned } from './src/services/bannedWords';
+import { encodeLook, parseLook } from './src/look';
+import { MAX_SEATS, nearestFreeSeat, SEAT_MS, SEAT_COOLDOWN_MS } from './src/layout';
+import { XP, HATS, levelOf, type Stats } from './src/progress';
+import { initStore, award, register, login, userByToken, dropToken, board, profileOf, newHolder, markDirty, cleanUsername, storageKind, BOARD_KINDS, type Holder, type User, type BoardKind } from './accounts';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
+const PROD = process.env.NODE_ENV === 'production' || process.argv.includes('--prod');
+
+const MAX_ONLINE = 200; // visitors in the grounds at once (the hall itself has only 120 seats, see layout.ts)
+const MAX_PER_IP = 4;
+// Minimum gap between two of the same action per visitor. There is no daily limit on practising:
+// these gaps only keep the animations from overlapping and stop scripts from flooding the server.
+// "tap" is one hit of the wooden fish while chanting (merit only, not broadcast); "fish" is the broadcast knock.
+const LIMIT_MS = { incense: 20_000, bell: 3_000, wish: 8_000, lantern: 10_000, fish: 1_500, chant: 20_000, bow: 1_500, tap: 250 } as const;
+type ActType = keyof typeof LIMIT_MS;
+
+type Client = {
+  id: string;
+  name: string;
+  x: number;
+  z: number;
+  r: number;
+  k: boolean; // kneeling
+  lastMove: number;
+  l: string; // outfit and gender, encoded by look.ts (empty = none chosen)
+  lastLook: number;
+  seat: number; // -1 = standing
+  seatCooldown: number;
+  user?: User; // set when the visitor is signed in; their progress is saved
+  guest: Holder; // otherwise progress only lasts for this visit
+  lv: number;
+  token?: string;
+  ip: string;
+  res: express.Response;
+  last: Partial<Record<ActType, number>>;
+};
+const dirtyMoves = new Set<string>();
+const WORLD = { xMax: 19.5, zMin: -6.9, zMax: 59.3 };
+const clients = new Map<string, Client>();
+const ipLast = new Map<string, number>();
+
+const app = express();
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.use(express.json({ limit: '2kb' }));
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+
+// ---- daily counters (kept in data/stats.json so a restart does not reset them) ----
+const STATS_FILE = path.join(process.cwd(), 'data', 'stats.json');
+const dayKey = () => new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 10); // Vietnam time
+let stats = { day: dayKey(), visitors: 0, incense: 0, bells: 0, wishes: 0, lanterns: 0, fish: 0, chants: 0 };
+try {
+  const saved = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+  if (saved.day === stats.day) stats = { ...stats, ...saved };
+} catch {
+  /* first run */
+}
+let dirty = false;
+const rollDay = () => {
+  if (stats.day !== dayKey()) stats = { day: dayKey(), visitors: 0, incense: 0, bells: 0, wishes: 0, lanterns: 0, fish: 0, chants: 0 };
+};
+const publicStats = () => ({ online: clients.size, seated: seats.filter(Boolean).length, queued: queue.length, ...stats });
+setInterval(() => {
+  if (!dirty) return;
+  dirty = false;
+  try {
+    fs.mkdirSync(path.dirname(STATS_FILE), { recursive: true });
+    fs.writeFileSync(STATS_FILE, JSON.stringify(stats));
+  } catch (err) {
+    console.error('Could not save stats:', err);
+  }
+}, 30_000);
+
+// ---- helpers ----
+const send = (res: express.Response, event: string, data: unknown) => {
+  try {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  } catch {
+    /* client gone */
+  }
+};
+const broadcast = (event: string, data: unknown) => clients.forEach((c) => send(c.res, event, data));
+
+const cleanText = (raw: unknown, max: number) =>
+  typeof raw === 'string'
+    ? maskBanned(raw.replace(/[\u0000-\u001f\u007f<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max))
+    : '';
+const cleanName = (raw: unknown) => cleanText(raw, 24) || 'Khách ghé thăm';
+const looksLikeContact = (t: string) => /https?:|www\.|\.com|\.vn|zalo|telegram|\d{8,}/i.test(t);
+
+const view = (c: Client) => ({ id: c.id, name: c.name, x: c.x, z: c.z, r: c.r, k: c.k, l: c.l, lv: c.lv });
+const holderOf = (c: Client): Holder => c.user ?? c.guest;
+const dayToday = () => new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 10);
+
+/** A look the visitor may wear: valid, and any hat only if their level allows it */
+function safeLook(raw: unknown, lv: number) {
+  const spec = parseLook(raw);
+  if (!spec) return '';
+  if (spec.n > 0 && (HATS[spec.n]?.min ?? 999) > lv) spec.n = 0;
+  return encodeLook(spec);
+}
+
+/** Give merit for a practice and tell the visitor (and everyone, for a new level) what happened */
+function reward(c: Client, gain: number, stat?: keyof Stats) {
+  const p = holderOf(c);
+  const r = award(p, gain, stat);
+  send(c.res, 'xp', { gain, ...profileOf(p), lv: r.after });
+  if (r.after !== r.before) {
+    c.lv = r.after;
+    broadcast('lvl', { id: c.id, lv: r.after });
+    send(c.res, 'levelup', { lv: r.after });
+  }
+  for (const b of r.fresh) send(c.res, 'badge', { id: b });
+}
+
+// sign-in attempts per address, to slow down guessing
+const authTries = new Map<string, number[]>();
+function tooManyTries(ip: string, kind: 'login' | 'register') {
+  const limit = kind === 'login' ? 10 : 6;
+  const span = kind === 'login' ? 10 * 60_000 : 60 * 60_000;
+  const key = `${kind}|${ip}`;
+  const now = Date.now();
+  const list = (authTries.get(key) ?? []).filter((t) => now - t < span);
+  list.push(now);
+  authTries.set(key, list);
+  return list.length > limit;
+}
+
+const feed: Array<{ name: string; text: string; t: number }> = [];
+
+// ---- the 120 seats: one person per seat, 5 minutes each ----
+const seats: Array<{ id: string; until: number } | null> = Array.from({ length: MAX_SEATS }, () => null);
+const seatList = () => seats.flatMap((s, i) => (s ? [{ seat: i, id: s.id, left: Math.max(0, s.until - Date.now()) }] : []));
+
+// People who want a seat when none is free wait here, first come first served. Someone who asked for a
+// particular number only gets that number; everyone else gets whichever seat is freed next.
+type Waiting = { id: string; want: number | null };
+const queue: Waiting[] = [];
+const sendQueue = () =>
+  queue.forEach((w, i) => {
+    const c = clients.get(w.id);
+    if (c) send(c.res, 'queue', { pos: i + 1, total: queue.length, want: w.want });
+  });
+function leaveQueue(id: string) {
+  const i = queue.findIndex((w) => w.id === id);
+  if (i < 0) return false;
+  queue.splice(i, 1);
+  const c = clients.get(id);
+  if (c) send(c.res, 'queue', { pos: 0, total: queue.length, want: null });
+  sendQueue();
+  return true;
+}
+function takeSeat(c: Client, idx: number) {
+  seats[idx] = { id: c.id, until: Date.now() + SEAT_MS };
+  c.seat = idx;
+  broadcast('seat', { seat: idx, id: c.id, left: SEAT_MS });
+}
+/** A seat just became free: hand it to the first person in line who can use it */
+function grantSeat(idx: number) {
+  while (true) {
+    const i = queue.findIndex((w) => w.want === null || w.want === idx);
+    if (i < 0) return;
+    const [w] = queue.splice(i, 1);
+    const c = clients.get(w.id);
+    if (!c || c.seat >= 0) continue;
+    takeSeat(c, idx);
+    send(c.res, 'queue', { pos: 0, total: queue.length, want: null });
+    sendQueue();
+    return;
+  }
+}
+
+function releaseSeat(c: Client, forced: boolean) {
+  if (c.seat < 0) return;
+  const old = c.seat;
+  seats[old] = null;
+  c.seat = -1;
+  broadcast('seat', { seat: old, id: null });
+  if (forced) {
+    c.seatCooldown = Date.now() + SEAT_COOLDOWN_MS;
+    send(c.res, 'stand', { cooldown: SEAT_COOLDOWN_MS });
+  }
+  grantSeat(old);
+}
+
+// whoever has had a seat for 5 minutes is asked to stand up
+setInterval(() => {
+  const now = Date.now();
+  seats.forEach((s) => {
+    if (!s || s.until > now) return;
+    const c = clients.get(s.id);
+    if (c) releaseSeat(c, true);
+    else seats[seats.indexOf(s)] = null;
+  });
+}, 1000);
+
+// ---- realtime stream: one connection per visitor ----
+app.get('/api/stream', (req, res) => {
+  const ip = req.ip || 'unknown';
+  if (clients.size >= MAX_ONLINE) return res.status(503).json({ error: 'full' });
+  if ([...clients.values()].filter((c) => c.ip === ip).length >= MAX_PER_IP) return res.status(429).json({ error: 'too_many' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  const id = crypto.randomBytes(5).toString('hex');
+  const token = typeof req.query.token === 'string' ? req.query.token : undefined;
+  const user = userByToken(token);
+  // everyone appears in the garden in front of the hall door, facing it
+  const client: Client = {
+    id,
+    user,
+    guest: newHolder(),
+    lv: user ? levelOf(user.xp) : 1,
+    token: user ? token : undefined,
+    name: user ? user.name : cleanName(req.query.name),
+    x: (Math.random() - 0.5) * 3,
+    z: 16.6 + Math.random() * 1.4,
+    r: Math.PI,
+    k: false,
+    lastMove: 0,
+    l: '',
+    lastLook: 0,
+    seat: -1,
+    seatCooldown: 0,
+    ip,
+    res,
+    last: {},
+  };
+  client.l = safeLook(user?.look || req.query.look, client.lv);
+  rollDay();
+  stats.visitors++;
+  dirty = true;
+
+  const me = view(client);
+  const people = [...clients.values()].map(view);
+  clients.set(id, client);
+  send(res, 'hello', {
+    me,
+    people: [...people, me],
+    feed,
+    stats: publicStats(),
+    seats: seatList(),
+    profile: profileOf(holderOf(client)),
+    account: user ? { username: user.key, name: user.name } : null,
+  });
+  clients.forEach((c) => c.id !== id && send(c.res, 'join', me));
+  // a small thank-you for coming back each day (this also keeps the streak going)
+  if (user && user.lastDay !== dayToday()) reward(client, 20);
+
+  const heartbeat = setInterval(() => res.write(': keep-alive\n\n'), 20_000);
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    clients.delete(id);
+    leaveQueue(id);
+    releaseSeat(client, false);
+    broadcast('leave', { id });
+  });
+});
+
+// ---- change outfit, hair or skin while in the hall ----
+app.post('/api/look', (req, res) => {
+  const { id, look } = req.body || {};
+  const c = typeof id === 'string' ? clients.get(id) : undefined;
+  if (!c) return res.status(401).json({ ok: false });
+  const spec = parseLook(look);
+  if (!spec) return res.status(400).json({ ok: false, error: 'Trang phục không hợp lệ.' });
+  if (spec.n > 0 && (HATS[spec.n]?.min ?? 999) > c.lv) {
+    return res.status(403).json({ ok: false, error: `${HATS[spec.n].name} mở khóa ở cấp ${HATS[spec.n].min}.` });
+  }
+  const now = Date.now();
+  if (now - c.lastLook < 800) return res.json({ ok: true });
+  c.lastLook = now;
+  c.l = encodeLook(spec);
+  if (c.user) {
+    c.user.look = c.l; // remembered for the next visit
+    markDirty();
+  }
+  broadcast('look', { id: c.id, l: c.l });
+  return res.json({ ok: true });
+});
+
+// ---- accounts: register, sign in, sign out, leaderboards ----
+const cleanDisplay = (raw: unknown) => cleanText(raw, 24);
+app.post('/api/register', (req, res) => {
+  if (tooManyTries(req.ip || 'x', 'register')) return res.status(429).json({ ok: false, error: 'Bạn đăng ký hơi nhiều lần, hãy thử lại sau.' });
+  const { username, password, display, id } = req.body || {};
+  const current = typeof id === 'string' ? clients.get(id) : undefined;
+  const name = cleanDisplay(display) || (typeof username === 'string' ? cleanDisplay(username) : '');
+  const r = register(username, password, name, current && !current.user ? current.guest : undefined);
+  if (!r.ok) return res.status(400).json(r);
+  return res.json({ ok: true, token: r.token, name: r.user.name, username: r.user.key });
+});
+app.post('/api/login', (req, res) => {
+  if (tooManyTries(req.ip || 'x', 'login')) return res.status(429).json({ ok: false, error: 'Bạn thử đăng nhập quá nhiều lần, hãy chờ vài phút.' });
+  const r = login(req.body?.username, req.body?.password);
+  if (!r.ok) return res.status(401).json(r);
+  return res.json({ ok: true, token: r.token, name: r.user.name, username: r.user.key });
+});
+app.post('/api/logout', (req, res) => {
+  if (typeof req.body?.token === 'string') dropToken(req.body.token);
+  return res.json({ ok: true });
+});
+app.get('/api/board', (req, res) => {
+  const kind = BOARD_KINDS.includes(req.query.kind as BoardKind) ? (req.query.kind as BoardKind) : 'xp';
+  const me = userByToken(req.query.token);
+  return res.json({ kind, ...board(kind, me?.key) });
+});
+void cleanUsername;
+void storageKind;
+
+// ---- take a seat by number (or the nearest free one), or give it up ----
+app.post('/api/seat', (req, res) => {
+  const { id, seat, release, queue: wantQueue, leaveQueue: cancelQueue } = req.body || {};
+  const c = typeof id === 'string' ? clients.get(id) : undefined;
+  if (!c) return res.status(401).json({ ok: false, error: 'Phiên đã hết, hãy tải lại trang.' });
+  if (release === true) {
+    releaseSeat(c, false);
+    return res.json({ ok: true });
+  }
+  if (cancelQueue === true) {
+    leaveQueue(c.id);
+    return res.json({ ok: true });
+  }
+  const now = Date.now();
+  if (now < c.seatCooldown) {
+    return res.status(429).json({ ok: false, error: `Bạn vừa ngồi xong, chờ ${Math.ceil((c.seatCooldown - now) / 1000)} giây nữa để ngồi lại.` });
+  }
+  const specific = typeof seat === 'number' && Number.isInteger(seat);
+  if (specific && (seat < 0 || seat >= MAX_SEATS)) return res.status(400).json({ ok: false, error: `Chỗ ngồi chỉ có số từ 1 đến ${MAX_SEATS}.` });
+  const isTaken = (i: number) => seats[i] !== null && seats[i]!.id !== c.id;
+  const want = specific ? (isTaken(seat) ? -1 : seat) : nearestFreeSeat(c.x, c.z, isTaken);
+
+  if (want < 0) {
+    // no seat for them right now: ask to wait in line, or tell them why not
+    if (wantQueue !== true) {
+      const msg = specific ? `Chỗ số ${seat + 1} đang có người ngồi. Bạn có thể xếp hàng chờ chỗ này.` : 'Chánh điện đủ 120 chỗ rồi. Bạn có thể xếp hàng chờ.';
+      return res.status(409).json({ ok: false, full: true, error: msg });
+    }
+    if (c.seat >= 0) return res.status(409).json({ ok: false, error: 'Bạn đang ngồi rồi, hãy đứng dậy trước khi xếp hàng.' });
+    let pos = queue.findIndex((w) => w.id === c.id);
+    if (pos < 0) pos = queue.push({ id: c.id, want: specific ? seat : null }) - 1;
+    else queue[pos].want = specific ? seat : null;
+    sendQueue();
+    return res.json({ ok: true, queued: true, pos: pos + 1 });
+  }
+  if (c.seat === want) return res.json({ ok: true, seat: want, left: Math.max(0, seats[want]!.until - now) });
+  leaveQueue(c.id);
+  releaseSeat(c, false);
+  if (seats[want]) return res.status(409).json({ ok: false, error: 'Chỗ này vừa có người ngồi, bạn chọn số khác nhé.' });
+  takeSeat(c, want);
+  return res.json({ ok: true, seat: want, left: SEAT_MS });
+});
+
+// ---- position of a visitor (a few times a second); relayed to everyone in one batch every 150 ms ----
+app.post('/api/move', (req, res) => {
+  const { id, x, z, r, k } = req.body || {};
+  const c = typeof id === 'string' ? clients.get(id) : undefined;
+  if (!c) return res.status(401).json({ ok: false });
+  const now = Date.now();
+  if (now - c.lastMove < 100) return res.json({ ok: true });
+  if (![x, z, r].every((n) => typeof n === 'number' && Number.isFinite(n))) return res.status(400).json({ ok: false });
+  c.lastMove = now;
+  c.x = Math.max(-WORLD.xMax, Math.min(WORLD.xMax, x));
+  c.z = Math.max(WORLD.zMin, Math.min(WORLD.zMax, z));
+  c.r = Math.max(-10, Math.min(10, r));
+  c.k = k === true;
+  dirtyMoves.add(c.id);
+  return res.json({ ok: true });
+});
+setInterval(() => {
+  if (!dirtyMoves.size) return;
+  const batch = [...dirtyMoves].flatMap((id) => {
+    const c = clients.get(id);
+    return c ? [[c.id, +c.x.toFixed(2), +c.z.toFixed(2), +c.r.toFixed(2), c.k ? 1 : 0]] : [];
+  });
+  dirtyMoves.clear();
+  if (batch.length) broadcast('moves', batch);
+}, 150);
+
+// ---- an action: light incense, ring the bell, send a wish, release a lantern ----
+app.post('/api/act', (req, res) => {
+  const { id, type, text } = req.body || {};
+  const client = typeof id === 'string' ? clients.get(id) : undefined;
+  if (!client) return res.status(401).json({ ok: false, error: 'Phiên đã hết, hãy tải lại trang.' });
+  if (typeof type !== 'string' || !(type in LIMIT_MS)) return res.status(400).json({ ok: false, error: 'Hành động không hợp lệ.' });
+  const t = type as ActType;
+  const now = Date.now();
+  const gap = LIMIT_MS[t];
+  const ipKey = `${client.ip}|${t}`;
+  if (gap && (now - (client.last[t] ?? 0) < gap || now - (ipLast.get(ipKey) ?? 0) < gap * 0.6)) {
+    return res.status(429).json({ ok: false, error: 'Bạn thao tác hơi nhanh, chờ một chút nhé.' });
+  }
+
+  let body = '';
+  if (t === 'wish' || t === 'lantern') {
+    body = cleanText(text, t === 'wish' ? 90 : 60);
+    if (!body) return res.status(400).json({ ok: false, error: 'Bạn chưa nhập lời nguyện.' });
+    if (looksLikeContact(body)) return res.status(400).json({ ok: false, error: 'Lời nguyện không nên có liên kết hoặc số điện thoại.' });
+  }
+
+  client.last[t] = now;
+  ipLast.set(ipKey, now);
+  if (ipLast.size > 5000) ipLast.clear();
+  rollDay();
+  // "bow" and "tap" are practice only: they earn merit and are not part of the hall's daily numbers
+  const counter: Partial<Record<ActType, 'incense' | 'bells' | 'wishes' | 'lanterns' | 'fish' | 'chants'>> = { incense: 'incense', bell: 'bells', wish: 'wishes', lantern: 'lanterns', fish: 'fish', chant: 'chants' };
+  const key = counter[t];
+  if (key) stats[key]++;
+  dirty = true;
+
+  // merit for the practice
+  const earn: Partial<Record<ActType, [number, keyof Stats]>> = {
+    incense: [XP.incense, 'incense'],
+    bell: [XP.bell, 'bells'],
+    wish: [XP.wish, 'wishes'],
+    lantern: [XP.lantern, 'lanterns'],
+    bow: [XP.bow, 'bows'],
+    tap: [XP.chant, 'chants'],
+  };
+  const e = earn[t];
+  if (e) reward(client, e[0], e[1]);
+
+  if (t === 'tap') return res.json({ ok: true }); // the knock itself is not shown to others
+  if (t === 'wish') {
+    feed.push({ name: client.name, text: body, t: now });
+    if (feed.length > 20) feed.shift();
+  }
+  broadcast('act', { id: client.id, name: client.name, type: t, text: body || undefined, t: now });
+  return res.json({ ok: true });
+});
+
+// one minute of sitting on a cushion is one minute of meditation
+setInterval(() => {
+  for (const c of clients.values()) if (c.seat >= 0) reward(c, XP.meditate, 'meditate');
+}, 60_000);
+
+setInterval(() => {
+  rollDay();
+  broadcast('stats', publicStats());
+}, 8_000);
+
+app.get('/healthz', (_req, res) => res.json({ ok: true, online: clients.size }));
+
+async function start() {
+  await initStore();
+  console.log(`Accounts are stored in: ${storageKind()}`);
+  const httpServer = http.createServer(app);
+  if (PROD) {
+    const dist = path.join(__dirname, 'dist');
+    app.use('/assets', express.static(path.join(dist, 'assets'), { maxAge: '7d' }));
+    app.use(express.static(dist, { maxAge: '1h' }));
+    app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
+  } else {
+    const { createServer } = await import('vite');
+    // HMR rides on this same http server, so it never asks for its own port (24678) and cannot clash with another copy
+    const vite = await createServer({ server: { middlewareMode: true, hmr: { server: httpServer } }, appType: 'spa' });
+    app.use(vite.middlewares);
+  }
+  // Port busy (another copy is open)? Take the next free one instead of crashing
+  let port = PORT;
+  httpServer.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE' && port < PORT + 20) httpServer.listen(++port, HOST);
+    else throw err;
+  });
+  httpServer.on('listening', () => console.log(`Tam Tinh Tam An ${PROD ? '(production)' : '(dev)'}: http://localhost:${port}`));
+  httpServer.listen(port, HOST);
+}
+
+start();
+
