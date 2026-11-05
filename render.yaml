@@ -12,6 +12,17 @@ services:
     runtime: docker
     plan: free
     healthCheckPath: /healthz
+    envVars:
+      # showcase account (level 120, everything maxed, hidden from leaderboards): sign in with ADMIN_USER / ADMIN_PASSWORD
+      - key: ADMIN_USER
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false # you type this in the Render dashboard; it never goes into the code
+      # keep accounts across restarts on the free plan: create a free Upstash Redis database and paste its REST url and token
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
 
 # disk for the paid plan (put it under the service above):
 #    disk:

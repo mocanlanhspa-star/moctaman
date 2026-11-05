@@ -8,7 +8,7 @@ import { maskBanned } from './src/services/bannedWords';
 import { encodeLook, parseLook } from './src/look';
 import { MAX_SEATS, nearestFreeSeat, SEAT_MS, SEAT_COOLDOWN_MS } from './src/layout';
 import { XP, HATS, levelOf, type Stats } from './src/progress';
-import { initStore, award, register, login, userByToken, dropToken, board, profileOf, newHolder, markDirty, cleanUsername, storageKind, BOARD_KINDS, type Holder, type User, type BoardKind } from './accounts';
+import { initStore, ensureAdmin, award, register, login, userByToken, dropToken, board, profileOf, newHolder, markDirty, cleanUsername, storageKind, BOARD_KINDS, type Holder, type User, type BoardKind } from './accounts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -313,6 +313,15 @@ app.post('/api/login', (req, res) => {
   if (!r.ok) return res.status(401).json(r);
   return res.json({ ok: true, token: r.token, name: r.user.name, username: r.user.key });
 });
+// which earned badges to show off on the profile (up to 3)
+app.post('/api/featured', (req, res) => {
+  const user = userByToken(req.body?.token);
+  if (!user) return res.status(401).json({ ok: false });
+  const ids: unknown[] = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  user.featured = [...new Set(ids.filter((x): x is string => typeof x === 'string' && user.badges.includes(x)))].slice(0, 3);
+  markDirty();
+  return res.json({ ok: true, featured: user.featured });
+});
 app.post('/api/logout', (req, res) => {
   if (typeof req.body?.token === 'string') dropToken(req.body.token);
   return res.json({ ok: true });
@@ -461,6 +470,7 @@ app.get('/healthz', (_req, res) => res.json({ ok: true, online: clients.size }))
 async function start() {
   await initStore();
   console.log(`Accounts are stored in: ${storageKind()}`);
+  if (ensureAdmin(process.env.ADMIN_USER, process.env.ADMIN_PASSWORD, process.env.ADMIN_NAME)) console.log('Showcase admin account is ready.');
   const httpServer = http.createServer(app);
   if (PROD) {
     const dist = path.join(__dirname, 'dist');

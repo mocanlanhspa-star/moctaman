@@ -146,3 +146,20 @@ body {
 ::selection {
   background: rgba(240, 195, 90, 0.35);
 }
+
+/* phones: every panel becomes a short bottom sheet so the 3D view stays visible */
+@media (max-width: 639px) {
+  .sheet {
+    top: auto !important;
+    right: 8px !important;
+    left: 8px !important;
+    bottom: 76px !important;
+    width: auto !important;
+    max-height: 52vh !important;
+    transform: none !important;
+    overflow-y: auto !important;
+    padding: 12px !important;
+  }
+  .feed-box .feed-line:not(:nth-last-child(-n + 2)) { display: none; }
+  .hide-phone { display: none !important; }
+}

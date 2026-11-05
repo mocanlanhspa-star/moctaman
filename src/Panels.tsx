@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Award, Bell, Crown, Drum, Flame, Heart, Lamp, Moon, PenLine, Sparkles, Sun, X } from 'lucide-react';
 import { AURA_TIERS, BADGES, HATS, LEVEL_MAX, levelOf, titleOf, xpForLevel } from './progress';
-import { authLogin, authRegister, fetchBoard, type BoardData, type BoardKind, type Profile } from './net';
+import { authLogin, authRegister, fetchBoard, saveFeatured, type BoardData, type BoardKind, type Profile } from './net';
 import { TRACKS_A, TRACKS_B, type TrackId } from './audio';
 
 const BADGE_ICONS: Record<string, typeof Award> = { sparkles: Sparkles, heart: Heart, flame: Flame, drum: Drum, moon: Moon, bell: Bell, pen: PenLine, lamp: Lamp, sun: Sun, award: Award, crown: Crown };
@@ -46,8 +46,16 @@ export function AuthForm({ mode, guestId, onAuthed }: { mode: 'login' | 'registe
 }
 
 // ---------------------------------------------------------------- profile: level, streak, stats, badges
-export function ProfilePanel({ profile, account, onClose, onSignUp, onSignOut }: { profile: Profile; account: { name: string } | null; onClose: () => void; onSignUp: () => void; onSignOut: () => void }) {
+export function ProfilePanel({ profile, account, token, onClose, onSignUp, onSignOut }: { profile: Profile; account: { name: string } | null; token?: string; onClose: () => void; onSignUp: () => void; onSignOut: () => void }) {
   const lv = levelOf(profile.xp);
+  const [pinned, setPinned] = useState<string[]>(profile.featured ?? []);
+  useEffect(() => setPinned(profile.featured ?? []), [profile.featured]);
+  const togglePin = (id: string) => {
+    if (!account || !token) return;
+    const next = pinned.includes(id) ? pinned.filter((x) => x !== id) : pinned.length >= 3 ? [...pinned.slice(1), id] : [...pinned, id];
+    setPinned(next);
+    void saveFeatured(token, next);
+  };
   const from = xpForLevel(lv);
   const to = xpForLevel(lv + 1);
   const pct = lv >= LEVEL_MAX ? 100 : Math.round(((profile.xp - from) / Math.max(1, to - from)) * 100);
@@ -59,13 +67,27 @@ export function ProfilePanel({ profile, account, onClose, onSignUp, onSignOut }:
     </div>
   );
   return (
-    <div className="glass rise-in absolute left-3 top-[150px] z-30 max-h-[calc(100vh-290px)] w-[min(92vw,360px)] overflow-y-auto rounded-3xl p-4 sm:left-5">
+    <div className="sheet glass rise-in absolute left-3 top-[150px] z-30 max-h-[calc(100vh-290px)] w-[min(92vw,360px)] overflow-y-auto rounded-3xl p-4 sm:left-5">
       <Close onClick={onClose} />
       <div className="flex items-center gap-3">
         <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-gradient-to-b from-[#ffe9a8] to-[#d9a03a] font-temple text-[22px] font-bold text-[#2a1608] shadow-[0_0_18px_rgba(255,210,110,0.6)]">{lv}</div>
         <div className="min-w-0">
           <div className="truncate font-temple text-[15px] font-semibold text-[#f0c35a]">{account?.name ?? 'Khách ghé thăm'}</div>
-          <div className="text-[12px] text-[#e8dcc4]">Cấp {lv} · {titleOf(lv)}</div>
+          <div className="text-[12px] text-[#e8dcc4]">Cấp {lv} · {titleOf(lv)}{profile.admin ? ' · Quản trị' : ''}</div>
+          {pinned.length > 0 && (
+            <div className="mt-1 flex gap-1">
+              {pinned.map((id) => {
+                const b = BADGES.find((x) => x.id === id);
+                if (!b) return null;
+                const Icon = BADGE_ICONS[b.icon] ?? Award;
+                return (
+                  <span key={id} title={b.name} className="flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-b from-[#ffe9a8] to-[#d9a03a] text-[#2a1608]">
+                    <Icon size={13} />
+                  </span>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
       <div className="mt-3">
@@ -109,12 +131,14 @@ export function ProfilePanel({ profile, account, onClose, onSignUp, onSignOut }:
         ))}
       </div>
       <div className="mt-4 text-[12px] font-semibold text-[#f0c35a]">Huy hiệu ({profile.badges.length}/{BADGES.length})</div>
+      <div className="text-[10.5px] text-[#a99c82]">{account ? 'Chạm vào huy hiệu đã có để ghim lên hồ sơ (tối đa 3).' : 'Đăng ký để ghim huy hiệu lên hồ sơ.'}</div>
       <div className="mt-1 grid grid-cols-4 gap-2">
         {BADGES.map((b) => {
           const Icon = BADGE_ICONS[b.icon] ?? Award;
           const on = have.has(b.id);
+          const pin = pinned.includes(b.id);
           return (
-            <div key={b.id} title={`${b.name}: ${b.desc}`} className={`flex flex-col items-center gap-1 rounded-xl p-1.5 text-center ${on ? 'bg-[#f0c35a]/15' : 'opacity-35'}`}>
+            <div key={b.id} onClick={() => on && togglePin(b.id)} title={`${b.name}: ${b.desc}`} className={`flex cursor-pointer flex-col items-center gap-1 rounded-xl p-1.5 text-center ${on ? (pin ? 'bg-[#f0c35a]/35 ring-1 ring-[#f0c35a]' : 'bg-[#f0c35a]/15') : 'opacity-35'}`}>
               <span className={`flex h-9 w-9 items-center justify-center rounded-full ${on ? 'bg-gradient-to-b from-[#ffe9a8] to-[#d9a03a] text-[#2a1608]' : 'bg-white/10 text-white'}`}>
                 <Icon size={17} />
               </span>
@@ -162,7 +186,7 @@ export function BoardPanel({ token, onClose }: { token: string; onClose: () => v
   }, [kind, token]);
   const unit = BOARD_TABS.find((t) => t[0] === kind)![2];
   return (
-    <div className="glass rise-in absolute right-3 top-[236px] z-30 max-h-[calc(100vh-330px)] w-[min(94vw,360px)] overflow-y-auto rounded-3xl p-4 sm:right-5 sm:top-[248px]">
+    <div className="sheet glass rise-in absolute right-3 top-[236px] z-30 max-h-[calc(100vh-330px)] w-[min(94vw,360px)] overflow-y-auto rounded-3xl p-4 sm:right-5 sm:top-[248px]">
       <Close onClick={onClose} />
       <div className="font-temple text-[14px] font-semibold text-[#f0c35a]">Bảng vàng tu tập</div>
       <div className="mt-2 flex flex-wrap gap-1.5">
@@ -220,7 +244,7 @@ export function MusicPanel({ a, b, onClose }: { a: Chan; b: Chan; onClose: () =>
     </div>
   );
   return (
-    <div className="glass rise-in absolute right-3 top-[236px] z-30 max-h-[calc(100vh-330px)] w-[min(94vw,340px)] overflow-y-auto rounded-3xl p-4 sm:right-5 sm:top-[248px]">
+    <div className="sheet glass rise-in absolute right-3 top-[236px] z-30 max-h-[calc(100vh-330px)] w-[min(94vw,340px)] overflow-y-auto rounded-3xl p-4 sm:right-5 sm:top-[248px]">
       <Close onClick={onClose} />
       <div className="font-temple text-[14px] font-semibold text-[#f0c35a]">Âm nhạc</div>
       <div className="text-[11px] text-[#a99c82]">Hai hệ thống nhạc chạy riêng, bật hoặc tắt riêng, chỉnh âm lượng riêng.</div>

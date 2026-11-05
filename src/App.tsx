@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
-import { Armchair, Bell, Crosshair, Drum, Flame, Heart, Info, Lamp, Lock, Maximize, Music, PenLine, PersonStanding, Send, Shirt, Tag, Trophy, Users, X } from 'lucide-react';
+import { Armchair, Bell, ChevronDown, ChevronUp, Crosshair, Drum, Flame, Heart, Info, Lamp, Lock, Maximize, Menu, Music, PenLine, PersonStanding, Send, Shirt, Tag, Trophy, Users, X } from 'lucide-react';
 import { GENDERS, HAIR_FOR, HAIR_STYLES, OUTFITS, SKIN_TONES, encodeLook, parseLook, specFor, type LookSpec } from './look';
 import { TempleWorld } from './three/world';
 import { EMPTY_PROFILE, Net, authLogout, type Account, type ActEvent, type NetStatus, type Person, type Profile, type QueueInfo, type SeatInfo, type Stats } from './net';
@@ -91,6 +91,10 @@ export default function App() {
   const [hint, setHint] = useState(true);
   const zoneTimer = useRef<number>(0);
   const touch = typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches;
+  const phone = typeof window !== 'undefined' && window.matchMedia('(max-width: 639px)').matches;
+  // phones: the icon column and the action bar are folded away until asked for
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [barOpen, setBarOpen] = useState(false);
   const [look, setLookState] = useState<LookSpec>(() => {
     try {
       const saved = parseLook(localStorage.getItem('ttta-look'));
@@ -131,6 +135,13 @@ export default function App() {
   const [seatEnds, setSeatEnds] = useState(0);
   const [queue, setQueue] = useState<QueueInfo | null>(null);
   const [seatCool, setSeatCool] = useState(0);
+  // on phones a panel replaces the action bar, so nothing piles up on the screen
+  useEffect(() => {
+    if (phone && (chant || seatOpen || composer || lookOpen || profileOpen || boardOpen || musicOpen)) {
+      setBarOpen(false);
+      setMenuOpen(false);
+    }
+  }, [phone, chant, seatOpen, composer, lookOpen, profileOpen, boardOpen, musicOpen]);
   const seatTakenRef = useRef<Record<number, string>>({});
   const mySeatRef = useRef(-1);
   const sutraRef = useRef<Sutra>(BUILTIN_SUTRAS[0]);
@@ -599,7 +610,7 @@ export default function App() {
       {entered && (
         <>
           <div className="absolute left-3 top-3 z-20 flex flex-col gap-2 sm:left-5 sm:top-5">
-            <div className="glass flex items-center gap-3 rounded-full py-2 pl-3 pr-5">
+            <div className="hide-phone glass flex items-center gap-3 rounded-full py-2 pl-3 pr-5">
               <span className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-b from-[#ffe9a8] to-[#d9a03a] text-[#2a1608]">
                 <Flame size={16} />
               </span>
@@ -628,7 +639,7 @@ export default function App() {
                 setBoardOpen(false);
                 setProfileOpen((v) => !v);
               }}
-              className="glass w-52 rounded-2xl px-3 py-2 text-left transition hover:brightness-110"
+              className="glass w-44 rounded-2xl px-3 py-2 text-left transition hover:brightness-110 sm:w-52"
             >
               <div className="flex items-center justify-between gap-2 text-[12px]">
                 <span className="font-semibold text-[#ffe9a8]">Cấp {level} · {titleOf(level)}</span>
@@ -644,8 +655,13 @@ export default function App() {
             </button>
           </div>
 
-          <div className="absolute right-3 top-3 z-20 flex gap-1.5 sm:right-5 sm:top-5">
-            <div className="glass flex items-center gap-0.5 rounded-full p-1">
+          <div className="absolute right-3 top-3 z-20 flex flex-col items-end gap-1.5 sm:right-5 sm:top-5 sm:flex-row">
+            {phone && (
+              <button onClick={() => setMenuOpen((v) => !v)} aria-label="Mở hoặc thu gọn biểu tượng" className="glass flex h-10 w-10 items-center justify-center rounded-full text-[#fbe7b8]">
+                {menuOpen ? <X size={18} /> : <Menu size={18} />}
+              </button>
+            )}
+            <div className={`glass items-center gap-0.5 rounded-full p-1 ${phone ? (menuOpen ? 'flex flex-col' : 'hidden') : 'flex'}`}>
               <IconBtn
                 label="Bảng vàng tu tập"
                 onClick={() => {
@@ -703,7 +719,7 @@ export default function App() {
           {touch && <Joystick onChange={(x, y) => worldRef.current?.setJoystick(x, y)} />}
 
           {/* feed */}
-          <div className={`pointer-events-none absolute left-3 z-20 w-[min(78vw,340px)] sm:left-5 ${touch ? 'bottom-[290px]' : 'bottom-[112px] sm:bottom-[120px]'}`}>
+          <div className={`feed-box pointer-events-none absolute left-3 z-20 w-[min(62vw,340px)] sm:left-5 ${touch ? 'bottom-[290px]' : 'bottom-[112px] sm:bottom-[120px]'}`}>
             {lines.slice(-5).map((l) => (
               <div key={l.id} className="feed-line mb-1.5 text-[12.5px] leading-snug">
                 <span className={l.kind === 'blessing' ? 'font-semibold text-[#ffe08a]' : 'font-semibold text-[#f0c35a]'}>{l.name}</span>
@@ -718,7 +734,7 @@ export default function App() {
 
           {/* chant: pick a text, tap the wooden fish, one line per tap */}
           {chant && (
-            <div className="glass rise-in absolute bottom-[112px] left-1/2 z-30 w-[min(94vw,460px)] -translate-x-1/2 rounded-3xl p-4 text-center sm:bottom-[124px]">
+            <div className="sheet glass rise-in absolute bottom-[112px] left-1/2 z-30 w-[min(94vw,460px)] -translate-x-1/2 rounded-3xl p-4 text-center sm:bottom-[124px]">
               <button onClick={() => { setChant(false); setAuto(false); }} className="absolute right-3 top-3 text-white/60 hover:text-white" aria-label="Đóng"><X size={16} /></button>
               <div className="font-temple text-[12px] uppercase tracking-[0.25em] text-[#e0b86a]">Tụng kinh, gõ mõ</div>
               <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1">
@@ -751,7 +767,7 @@ export default function App() {
 
           {/* outfit panel: the camera turns to face the character while it is open */}
           {lookOpen && (
-            <div className="glass rise-in absolute left-3 top-[150px] z-30 max-h-[calc(100vh-290px)] w-[min(92vw,340px)] overflow-y-auto rounded-3xl p-4 sm:left-5">
+            <div className="sheet glass rise-in absolute left-3 top-[150px] z-30 max-h-[calc(100vh-290px)] w-[min(92vw,340px)] overflow-y-auto rounded-3xl p-4 sm:left-5">
               <button onClick={toggleLookPanel} className="absolute right-3 top-3 text-white/60 hover:text-white" aria-label="Đóng"><X size={16} /></button>
               <div className="font-temple mb-2 text-[14px] font-semibold text-[#f0c35a]">Trang phục đi chánh điện</div>
               <LookPicker look={look} onChange={changeLook} level={level} />
@@ -760,7 +776,7 @@ export default function App() {
 
           {/* seats: 120 cushions, 5 minutes each, a line when all are taken */}
           {seatOpen && (
-            <div className="glass rise-in absolute bottom-[112px] left-1/2 z-30 flex max-h-[62vh] w-[min(96vw,480px)] -translate-x-1/2 flex-col rounded-3xl p-4 sm:bottom-[124px]">
+            <div className="sheet glass rise-in absolute bottom-[112px] left-1/2 z-30 flex max-h-[62vh] w-[min(96vw,480px)] -translate-x-1/2 flex-col rounded-3xl p-4 sm:bottom-[124px]">
               <button onClick={() => setSeatOpen(false)} className="absolute right-3 top-3 text-white/60 hover:text-white" aria-label="Đóng"><X size={16} /></button>
               <div className="font-temple text-[14px] font-semibold text-[#f0c35a]">Chỗ ngồi trong chánh điện</div>
               <div className="mt-1 text-[11.5px] leading-relaxed text-[#cbbd9f]">
@@ -799,6 +815,7 @@ export default function App() {
             <ProfilePanel
               profile={profile}
               account={account}
+              token={tokenRef.current}
               onClose={() => setProfileOpen(false)}
               onSignUp={() => {
                 setProfileOpen(false);
@@ -831,7 +848,7 @@ export default function App() {
 
           {/* wish / lantern composer */}
           {composer && (
-            <div className="glass rise-in absolute bottom-[112px] left-1/2 z-30 w-[min(94vw,430px)] -translate-x-1/2 rounded-3xl p-4 sm:bottom-[124px]">
+            <div className="sheet glass rise-in absolute bottom-[112px] left-1/2 z-30 w-[min(94vw,430px)] -translate-x-1/2 rounded-3xl p-4 sm:bottom-[124px]">
               <button onClick={() => setComposer(null)} className="absolute right-3 top-3 text-white/60 hover:text-white" aria-label="Đóng"><X size={16} /></button>
               <div className="font-temple text-[13px] font-semibold text-[#f0c35a]">{composer === 'wish' ? 'Gửi một lời nguyện lành' : 'Thả một chiếc đèn hoa đăng'}</div>
               <div className="mt-2 flex gap-2">
@@ -854,7 +871,13 @@ export default function App() {
 
           {/* action bar */}
           <div className="absolute bottom-[max(14px,env(safe-area-inset-bottom))] left-1/2 z-20 -translate-x-1/2">
-            <div className="glass flex max-w-[96vw] items-center gap-0.5 overflow-x-auto rounded-[26px] p-1.5">
+            {phone && (
+              <button onClick={() => setBarOpen((v) => !v)} aria-label="Mở hoặc thu gọn thanh hành động" className="glass mx-auto mb-1 flex items-center gap-1.5 rounded-full px-4 py-2 text-[12.5px] font-semibold text-[#ffe9a8]">
+                {barOpen ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                {barOpen ? 'Thu gọn' : 'Hành động'}
+              </button>
+            )}
+            <div className={`glass max-w-[96vw] items-center gap-0.5 overflow-x-auto rounded-[26px] p-1.5 ${phone && !barOpen ? 'hidden' : 'flex'}`}>
               <ActBtn icon={<Heart size={22} />} label="Lạy Phật" onClick={bow} />
               <ActBtn icon={<PersonStanding size={22} />} label={kneeling ? 'Đứng dậy' : 'Quỳ lạy'} active={kneeling} onClick={() => worldRef.current?.toggleKneel()} />
               <ActBtn icon={<Flame size={22} />} label={offering ? 'Đang thắp…' : incenseLeft > 0 ? `${incenseLeft}s` : 'Thắp hương'} disabled={incenseLeft > 0 || offering} onClick={lightIncense} />
@@ -865,7 +888,7 @@ export default function App() {
               <ActBtn icon={<PenLine size={22} />} label="Lời nguyện" active={composer === 'wish'} onClick={() => { setChant(false); setComposer((c) => (c === 'wish' ? null : 'wish')); }} />
               <ActBtn icon={<Lamp size={22} />} label="Đèn hoa đăng" active={composer === 'lantern'} onClick={() => { setChant(false); setComposer((c) => (c === 'lantern' ? null : 'lantern')); }} />
             </div>
-            <p className="mt-1.5 text-center text-[9.5px] text-white/45">Không gian thư giãn mang tính giải trí · không phải chùa, không đại diện tổ chức tôn giáo nào</p>
+            <p className="hide-phone mt-1.5 text-center text-[9.5px] text-white/45">Không gian thư giãn mang tính giải trí · không phải chùa, không đại diện tổ chức tôn giáo nào</p>
           </div>
 
           {helpOpen && (

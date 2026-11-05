@@ -10,7 +10,7 @@ export type QueueInfo = { pos: number; total: number; want: number | null }; // 
 export type ActEvent = { id: string; name: string; type: ActType; text?: string; t: number };
 export type Stats = { online: number; visitors: number; incense: number; bells: number; wishes: number; lanterns: number; fish: number; chants: number; seated?: number; queued?: number };
 export type FeedItem = { name: string; text: string; t: number };
-export type Profile = { xp: number; stats: PracticeStats; streak: number; badges: string[]; today: number };
+export type Profile = { xp: number; stats: PracticeStats; streak: number; badges: string[]; today: number; featured?: string[]; admin?: boolean };
 export type Account = { username: string; name: string };
 export type NetStatus = 'connecting' | 'online' | 'solo' | 'reconnecting';
 
@@ -217,6 +217,7 @@ const post = async (url: string, body: unknown): Promise<AuthResult> => {
 export const authRegister = (username: string, password: string, display: string, id?: string) => post('/api/register', { username, password, display, id });
 export const authLogin = (username: string, password: string) => post('/api/login', { username, password });
 export const authLogout = (token: string) => post('/api/logout', { token });
+export const saveFeatured = (token: string, ids: string[]) => post('/api/featured', { token, ids });
 
 export type BoardKind = 'xp' | 'today' | 'bows' | 'chants' | 'meditate' | 'streak';
 export type BoardRow = { rank: number; name: string; lv: number; value: number };

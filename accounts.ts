@@ -8,7 +8,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { earnedBadges, emptyStats, levelOf, type Stats } from './src/progress';
+import { BADGES, LEVEL_MAX, earnedBadges, emptyStats, levelOf, xpForLevel, type Stats } from './src/progress';
 
 export type Holder = {
   xp: number;
@@ -19,7 +19,16 @@ export type Holder = {
   todayXp: number;
   badges: string[];
 };
-export type User = Holder & { key: string; name: string; salt: string; hash: string; created: number; look: string };
+export type User = Holder & {
+  key: string;
+  name: string;
+  salt: string;
+  hash: string;
+  created: number;
+  look: string;
+  featured: string[]; // up to 3 badges shown next to the name
+  admin?: boolean; // the owner's showcase account: everything maxed, kept off the public leaderboards
+};
 type Blob = { users: Record<string, User>; tokens: Record<string, { k: string; e: number }> };
 
 let data: Blob = { users: {}, tokens: {} };
@@ -131,6 +140,7 @@ export function register(username: unknown, password: unknown, display: string, 
     hash: hashPw(password, salt),
     created: Date.now(),
     look: '',
+    featured: [],
   };
   if (merge) {
     // what the visitor practised as a guest in this visit is kept
@@ -181,6 +191,7 @@ const valueOf = (u: User, kind: BoardKind) => {
 
 export function board(kind: BoardKind, meKey?: string, limit = 20) {
   const rows = Object.values(data.users)
+    .filter((u) => !u.admin)
     .map((u) => ({ u, v: valueOf(u, kind) }))
     .filter((r) => r.v > 0)
     .sort((a, b) => b.v - a.v || a.u.created - b.u.created);
@@ -190,4 +201,46 @@ export function board(kind: BoardKind, meKey?: string, limit = 20) {
 }
 
 /** What the page shows about someone's progress */
-export const profileOf = (p: Holder) => ({ xp: p.xp, stats: p.stats, streak: p.streak, badges: p.badges, today: p.todayKey === dayKey() ? p.todayXp : 0 });
+export const profileOf = (p: Holder | User) => ({
+  xp: p.xp,
+  stats: p.stats,
+  streak: p.streak,
+  badges: p.badges,
+  today: p.todayKey === dayKey() ? p.todayXp : 0,
+  featured: 'featured' in p ? p.featured : [],
+  admin: 'admin' in p && p.admin === true,
+});
+
+/**
+ * The owner's showcase account, made from two environment variables so the password never sits in the code:
+ * ADMIN_USER (default "admin") and ADMIN_PASSWORD. Everything is maxed: level 120, every stat, every badge.
+ * It is recreated with these values each time the server starts, and it is left off the public leaderboards.
+ */
+export function ensureAdmin(username: string | undefined, password: string | undefined, display: string | undefined) {
+  const key = cleanUsername(username || 'admin');
+  if (!key || !password || password.length < 8) return false;
+  const salt = crypto.randomBytes(12).toString('hex');
+  const old = data.users[key];
+  const maxXp = xpForLevel(LEVEL_MAX) + 5000;
+  const admin: User = {
+    ...(old ?? newHolder()),
+    key,
+    name: display || 'Quản trị Mộc An Lành',
+    salt,
+    hash: hashPw(password, salt),
+    created: old?.created ?? Date.now(),
+    look: old?.look ?? '',
+    featured: old?.featured?.length ? old.featured : ['cap-120', 'cap-100', 'chuoi-100'],
+    admin: true,
+    xp: Math.max(old?.xp ?? 0, maxXp),
+    stats: { bows: 12000, incense: 1200, bells: 600, chants: 60000, meditate: 7200, wishes: 400, lanterns: 300 },
+    streak: 120,
+    lastDay: dayKey(),
+    todayKey: dayKey(),
+    todayXp: old?.todayKey === dayKey() ? old.todayXp : 0,
+    badges: BADGES.map((b) => b.id),
+  };
+  data.users[key] = admin;
+  markDirty();
+  return true;
+}
