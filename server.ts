@@ -475,8 +475,12 @@ async function start() {
   if (PROD) {
     const dist = path.join(__dirname, 'dist');
     app.use('/assets', express.static(path.join(dist, 'assets'), { maxAge: '7d' }));
-    app.use(express.static(dist, { maxAge: '1h' }));
-    app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
+    // the page itself is never cached, so a new release shows up on the next visit (hashed assets above are cached)
+    app.use(express.static(dist, { maxAge: '1h', setHeaders: (res, file) => { if (file.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache'); } }));
+    app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(path.join(dist, 'index.html'));
+    });
   } else {
     const { createServer } = await import('vite');
     // HMR rides on this same http server, so it never asks for its own port (24678) and cannot clash with another copy
