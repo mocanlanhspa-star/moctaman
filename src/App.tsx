@@ -715,7 +715,7 @@ export default function App() {
               {touch ? 'Cần bên trái để đi · vuốt màn hình để xoay · chụm hai ngón để phóng to' : 'W A S D hoặc mũi tên để đi · Shift để chạy · kéo chuột để xoay · cuộn để phóng to · K để quỳ lạy · bấm xuống sàn để đi tới đó'}
             </div>
           )}
-          <MiniMap world={worldRef} />
+          <MiniMap world={worldRef} hidden={phone && menuOpen} />
           {touch && <Joystick onChange={(x, y) => worldRef.current?.setJoystick(x, y)} />}
 
           {/* feed */}
@@ -915,7 +915,7 @@ export default function App() {
   );
 }
 
-function MiniMap({ world }: { world: RefObject<TempleWorld | null> }) {
+function MiniMap({ world, hidden }: { world: RefObject<TempleWorld | null>; hidden?: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const c = ref.current;
@@ -956,7 +956,7 @@ function MiniMap({ world }: { world: RefObject<TempleWorld | null> }) {
     const id = window.setInterval(draw, 120);
     return () => window.clearInterval(id);
   }, [world]);
-  return <canvas ref={ref} width={80} height={156} className="glass absolute right-3 top-[64px] z-20 rounded-xl sm:right-5 sm:top-[76px]" />;
+  return <canvas ref={ref} width={80} height={156} className={`glass absolute right-3 top-[64px] z-10 rounded-xl sm:right-5 sm:top-[76px] ${hidden ? 'hidden' : ''}`} />;
 }
 
 function Joystick({ onChange }: { onChange: (x: number, y: number) => void }) {
